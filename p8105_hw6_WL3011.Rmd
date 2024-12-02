@@ -13,6 +13,7 @@ set.seed(1)
 library(ggplot2)
 library(broom)
 library(purrr)
+library(modelr)
 ```
 
 ## Problem 1
@@ -170,7 +171,7 @@ city_or = homicide_data |>
 kable(city_or, digits = 4)
 ```
 
-```{r, message = FALSE, warning=FALSE,  fig.width = 6, fig.height = 5, fig.cap="Figure 3. Adjusted Odds Ratios by City"}
+```{r, message = FALSE, warning=FALSE,  fig.width = 9, fig.height = 8, fig.cap="Figure 3. Adjusted Odds Ratios by City"}
 ggplot(city_or, aes(x = reorder(city_state, odds_ratio), y = odds_ratio)) +
   geom_point() +
   geom_errorbar(aes(ymin = lower_ci, ymax = upper_ci), width = 0.2) +
@@ -180,8 +181,108 @@ ggplot(city_or, aes(x = reorder(city_state, odds_ratio), y = odds_ratio)) +
     y = "Odds Ratio (Male vs Female)"
   ) +
   theme_minimal()
-
 ```
+
+The vast majority of cities have an OR of less than 1, indicating that male victims have a lower probability of case resolution than female victims. However, cities such as San Francisco, CA, and Oakland, CA have an OR close to 1 and a confidence interval that crosses 1. This means that there is no significant difference in the likelihood of cases being resolved between men and women in these cities. A few cities (such as Albuquerque, NM, and Stockton, CA) have an OR greater than 1, indicating a higher probability of case resolution for men than for women. 
+
+In addition, some cities (such as Albuquerque, NM, and San Bernardino, CA) have wide confidence intervals, indicating that these cities may have insufficient data and less accurate estimates.
+
+## Problem 3
+
+```{r, message = FALSE, warning=FALSE}
+birthweight_data = read_csv("./birthweight.csv", 
+           na = c("NA", ".", "")) |>
+           janitor::clean_names() |>
+  mutate(
+    babysex = factor(case_when(
+      babysex == 1 ~ "male",
+      babysex == 2 ~ "female")),
+    frace = factor(case_when(
+      frace == 1 ~ "White",
+      frace == 2 ~ "Black",
+      frace == 3 ~ "Asian",
+      frace == 4 ~ "Puerto Rican",
+      frace == 8 ~ "Other",
+      frace == 9 ~ "Unknown")),
+    mrace = factor(case_when(
+      mrace == 1 ~ "White",
+      mrace == 2 ~ "Black",
+      mrace == 3 ~ "Asian",
+      mrace == 4 ~ "Puerto Rican",
+      mrace == 8 ~ "Other")),
+    malform = factor(case_when(
+      malform == 0 ~ "absent",
+      malform == 1 ~ "present"))) |>
+  drop_na()
+```
+
+Stepwise regression is performed, and the optimal variable set is selected automatically through AIC.
+
+```{r, message = FALSE, warning=FALSE}
+# Stepwise regression
+library(MASS)
+
+full_model = lm(bwt ~ ., data = birthweight_data)
+null_model = lm(bwt ~ 1, data = birthweight_data)
+selected_model = stepAIC(
+  object = null_model,         
+  scope = list(lower = null_model, upper = full_model),  
+  direction = "both",         
+  trace = FALSE               
+)
+
+detach("package:MASS", unload = TRUE)
+
+summary(selected_model)
+```
+
+```{r, message = FALSE, warning=FALSE}
+hypothesis_model = lm(bwt ~ bhead + blength + mrace + delwt + gaweeks + 
+    smoken + ppbmi + babysex + parity + wtgain + fincome, data = birthweight_data)
+
+# Residuals vs. Fitted Values Plot
+birthweight_data = birthweight_data |>
+  add_predictions(hypothesis_model) |>
+  add_residuals(hypothesis_model)
+
+ggplot(birthweight_data, aes(x = pred, y = resid)) +
+  geom_point(alpha = 0.5, color = "orange") +
+  geom_smooth(method = "loess", color = "skyblue", se = FALSE) +
+  labs(title = "Residuals vs Fitted Values",
+       x = "Fitted Values",
+       y = "Residuals") +
+  theme_minimal()
+```
+
+```{r}
+model1 = lm(bwt ~ blength + gaweeks, data = birthweight_data)
+model2 = lm(bwt ~ bhead + blength + babysex + 
+              bhead * blength + blength * babysex + bhead * babysex +
+              bhead * blength * babysex, data = birthweight_data)
+
+# Evaluate models with cross-validation
+cv_results = crossv_mc(birthweight_data, n = 100) |>
+  mutate(
+    hypothesis_model = map(train, ~hypothesis_model),
+    model1 = map(train, ~model1),
+    model2 = map(train, ~model2),
+    rmse_hypothesis = map2_dbl(hypothesis_model, test, \(Model, df) rmse(model = Model, data = df)),
+    rmse_model1 = map2_dbl(model1, test, \(Model, df) rmse(model = Model, data = df)),
+    rmse_model2 = map2_dbl(model2, test, \(Model, df) rmse(model = Model, data = df)),
+  )
+
+# Summarize average RMSE for each model
+cv_summary = cv_results |>
+  summarize(
+    hypothesis_rmse = mean(rmse_hypothesis),
+    model1_rmse = mean(rmse_model1),
+    model2_rmse = mean(rmse_model2)
+  )
+
+kable(cv_summary, digits = 4)
+```
+
+The **Hypothesis Model** had the lowest RMSE, indicating that it captured more key variables and information, and had the best predictive performance for birth weight. Although Model 2 improves performance by including interaction terms, it is still slightly inferior to Hypothesis Model due to increased complexity. Model 1 is the simplest model, but it misses many important predictors and has a large prediction error.
 
 
 
