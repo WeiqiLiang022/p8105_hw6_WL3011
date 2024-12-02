@@ -1,0 +1,187 @@
+---
+title: "p8105_hw6_WL3011"
+author: "Weiqi Liang"
+date: "`r Sys.Date()`"
+output: github_document
+---
+
+```{r setup, message = FALSE, results='hide'}
+library(tidyverse)
+library(dplyr)
+library(knitr)
+set.seed(1)
+library(ggplot2)
+library(broom)
+library(purrr)
+```
+
+## Problem 1
+
+```{r, message = FALSE, results='hide'}
+weather_df = 
+  rnoaa::meteo_pull_monitors(
+    c("USW00094728"),
+    var = c("PRCP", "TMIN", "TMAX"), 
+    date_min = "2017-01-01",
+    date_max = "2017-12-31") |>
+  mutate(
+    name = recode(id, USW00094728 = "CentralPark_NY"),
+    tmin = tmin / 10,
+    tmax = tmax / 10) |>
+  select(name, id, everything())
+```
+
+Dataset **weather_df** has `r nrow(weather_df)` rows and `r ncol(weather_df)` columns, showing the 2017 Central Park weather data. Each row represents a single day's weather data.
+
+First generate 5000 bootstrap samples to estimate the two quantities:
+
+${\hat r^2}$ (R-squared)
+
+$\log ({\hat \beta _0} \cdot {\hat \beta _1})$ (log-transformed product of coefficients)
+
+```{r}
+# Bootstrap 
+bootstrap_results = weather_df |> 
+  modelr::bootstrap(n = 5000) |> 
+  mutate(
+    models = map(strap, \(df) lm(tmax ~ tmin, data = df)),
+    # R^2
+    r_squared = map_dbl(models, \(model) broom::glance(model) |> pull(r.squared)),
+    # log(Beta0 * Beta1)
+    log_beta_product = map_dbl(models, \(model) {
+      coefs <- broom::tidy(model) |> pull(estimate)
+      log(coefs[1] * coefs[2])
+    })
+  ) |> 
+  select(-strap, -models)
+```
+
+Create plots of the bootstrap distributions for ${\hat r^2}$ and $\log ({\hat \beta _0} \cdot {\hat \beta _1})$.
+
+```{r}
+ci_r_squared = quantile(bootstrap_results |> pull(r_squared), probs = c(0.025, 0.975))
+ci_log_beta_product = quantile(bootstrap_results |> pull(log_beta_product), probs = c(0.025, 0.975))
+
+# R^2 
+ggplot(bootstrap_results, aes(x = r_squared)) +
+  geom_density(fill = "pink", alpha = 0.2) +
+  geom_vline(xintercept = ci_r_squared,
+             color = "red", linetype = "dashed") +
+  labs(title = "Bootstrap Density of R^2",
+       x = "R^2", y = "Density") +
+  theme_minimal()
+```
+
+Most of the ${\hat r^2}$ values are concentrated in the region close to the median value 0.91, and the overall distribution is close to symmetry.
+
+```{r}
+# log(Beta0 * Beta1) 
+ggplot(bootstrap_results, aes(x = log_beta_product)) +
+  geom_density(fill = "skyblue", alpha = 0.2) +
+  geom_vline(xintercept = ci_log_beta_product,
+             color = "red", linetype = "dashed") +
+  labs(title = "Bootstrap Density of log(Beta0 * Beta1) ",
+       x = "log(Beta0 * Beta1) ", y = "Density") +
+  theme_minimal()
+```
+
+The $\log ({\hat \beta _0} \cdot {\hat \beta _1})$ are mainly concentrated in the range of pairs from 1.95 to 2.10. The symmetry and compact shape of the distribution indicate that the measurement is relatively stable across multiple samples.
+
+Using the bootstrap results, compute the 2.5% and 97.5% quantiles for both quantities.
+
+```{r}
+kable(ci_r_squared, 
+      col.names = c("quantiles", "value"),
+      digits = 4)
+kable(ci_log_beta_product, 
+      col.names = c("quantiles", "value"),
+      digits = 4)
+```
+
+The 95% CI for ${\hat r^2}$ is (`r sprintf("%.4f", ci_r_squared[1])`, `r sprintf("%.4f", ci_r_squared[2])`).
+
+The 95% CI for $\log ({\hat \beta _0} \cdot {\hat \beta _1})$ is (`r sprintf("%.4f", ci_log_beta_product[1])`, `r sprintf("%.4f", ci_log_beta_product[2])`).
+
+## Problem 2
+
+First, perform data cleansing as required.
+
+```{r, message = FALSE, warning=FALSE}
+homicide_data = read_csv("./homicide-data.csv", 
+           na = c("NA", ".", "")) |>
+           janitor::clean_names() |>
+  mutate(city_state = paste(city, state, sep = ", "),
+         victim_age = as.numeric(victim_age),
+         resolved = ifelse(disposition == "Closed by arrest", 1, 0)) |>
+  filter(
+    !(city_state %in% c(
+      "Dallas, TX", "Phoenix, AZ", "Kansas City, MO", "Tulsa, AL"
+      )),
+    victim_race %in% c("White", "Black"),
+    !is.na(victim_age)) 
+```
+
+Then create logistic regression model for Baltimore, MD.
+
+```{r}
+baltimore_data = homicide_data |>
+  filter(city_state == "Baltimore, MD")
+
+baltimore_model = glm(
+  resolved ~ victim_age + victim_sex + victim_race,
+  data = baltimore_data,
+  family = binomial
+)
+
+# baltimore OR
+baltimore_or = broom::tidy(baltimore_model) |>
+  mutate(
+    odds_ratio = exp(estimate),
+    lower_ci = exp(estimate - 1.96 * std.error),
+    upper_ci = exp(estimate + 1.96 * std.error)
+  ) |>
+  filter(term == "victim_sexMale") |>
+select(term, odds_ratio, lower_ci, upper_ci) 
+
+kable(baltimore_or, digits = 4)
+```
+
+The Odds Ratio(OR) is 0.4255, meaning that male victims are significantly less likely to have their cases resolved than female victims. At a 95% confidence level, the actual OR value may fall between 0.3246 and 0.5579. CI does not contain 1, so this result can be considered statistically significant.
+
+```{r}
+# all cities OR
+city_or = homicide_data |>
+  group_by(city_state) |>
+  nest() |>
+  mutate(
+    models = map(data, \(df) glm(resolved ~ victim_age + victim_sex + victim_race, family = binomial, data = df)),
+    or_results = map(models, \(model) broom::tidy(model) |>
+                       mutate(
+                         odds_ratio = exp(estimate),
+                         lower_ci = exp(estimate - 1.96 * std.error),
+                         upper_ci = exp(estimate + 1.96 * std.error)
+                       ))
+  ) |>
+  unnest(or_results) |>
+  filter(term == "victim_sexMale") |>
+  arrange(desc(odds_ratio)) |>
+  select(city_state, odds_ratio, lower_ci, upper_ci) 
+
+kable(city_or, digits = 4)
+```
+
+```{r, message = FALSE, warning=FALSE,  fig.width = 6, fig.height = 5, fig.cap="Figure 3. Adjusted Odds Ratios by City"}
+ggplot(city_or, aes(x = reorder(city_state, odds_ratio), y = odds_ratio)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = lower_ci, ymax = upper_ci), width = 0.2) +
+  coord_flip() +
+  labs(
+    x = "City",
+    y = "Odds Ratio (Male vs Female)"
+  ) +
+  theme_minimal()
+
+```
+
+
+
